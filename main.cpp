@@ -644,7 +644,10 @@ namespace monolith
                 currentNamespace.pop_back();
 
             if(currentNamespace.length() > 0)
+            {
                 currentNamespace.pop_back();
+                currentNamespace.pop_back();
+            }
         }
         
         Function* ExtractFunction(string& line)
@@ -795,8 +798,12 @@ namespace monolith
                 }
                 else if (util::endsWith(line, ")") || util::endsWith(line, ","))
                 {
+                    enterNamespace(structClass->GetName());
+                    
                     Method* m = ExtractMethod(line);
                     structClass->AddMember(m, accSpecifier);
+                    
+                    exitNamespace();
                 }
                 else if (util::startsWith(line, "/*"))
                 {
