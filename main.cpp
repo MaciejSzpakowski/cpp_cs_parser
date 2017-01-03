@@ -1015,8 +1015,8 @@ int main(int argc, char** argv)
     try
     {
         monolith::Monolith mono(args);
-        mono.Dump(std::ofstream("C:/Users/Szpak/Documents/Visual Studio 2015/Projects/CppHeaderBuilder/CppHeaderBuilder/header.h"), 
-            std::ofstream("C:/Users/Szpak/Documents/Visual Studio 2015/Projects/CppHeaderBuilder/CppHeaderBuilder/source.cpp"), "header.h");
+        mono.Dump(std::ofstream("header.h"), 
+            std::ofstream("source.cpp"), "header.h");
         //mono.Dump(std::cout, std::cout, "header.h");
     }
     catch (std::runtime_error& e)
