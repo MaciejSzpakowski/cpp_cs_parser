@@ -28,19 +28,26 @@
 #include <sstream>
 #include <regex>
 #include <type_traits>
+#include <unordered_map>
 
 using std::vector;
 using std::string;
 
 namespace util
 {
+    struct Match
+    {
+        int position;
+        string str;
+    };
+
     bool startsWith(const string& s, const string& start)
     {
         return s.find(start) == 0;
     }
 
     template <typename T>
-    T first_or_default(const vector<T>& v, std::function<bool(T)> pred)
+    T firstOrDefault(const vector<T>& v, std::function<bool(T)> pred)
     {
         for (int i = 0; i < v.size(); i++)
             if (pred(v.at(i)))
@@ -50,6 +57,21 @@ namespace util
             return nullptr;
         else
             return T();
+    }
+
+    // returns first match of 'regex' in s
+    // if there is no match, it returns (-1, "")
+    Match firstMatch(const string& s, const string& regex)
+    {
+        std::smatch result;
+        std::regex r(regex);
+
+        std::regex_search(s, result, r);
+
+        if (result.size() == 0)
+            return{ -1, "" };
+        else
+            return{ result.position(0), result[0] };
     }
 
     void syntaxError(int line, const string& filename, const char* msg)
@@ -82,14 +104,12 @@ namespace util
 
     string removeLineComment(const string& s)
     {
-        std::smatch result;
-        std::regex comment("\\s*//");
-        std::regex_search(s, result, comment);
+        auto comment = util::firstMatch(s, "\\s*//");
 
-        if (result.size() == 0)
+        if (comment.position == -1)
             return s;
 
-        return s.substr(0, result.position(0));
+        return s.substr(0, comment.position);
     }
 
     bool endsWith(const string& s, const string& end)
@@ -112,6 +132,11 @@ namespace monolith
     {
     public:
         virtual void Dump(std::ostream& header, std::ostream& source) = 0;
+
+        virtual const string& GetProto()
+        {
+            throw std::runtime_error("GetProto() used without override");
+        };
     };
 
     class BaseFunc
@@ -144,14 +169,12 @@ namespace monolith
             // find first '('
             int index = proto.find('(');
             // find id
-            std::smatch m;
-            std::regex r("[~_a-zA-Z0-9]+\\s*\\(");
-            std::regex_search(proto, m, r);
+            auto id = util::firstMatch(proto, "[~_a-zA-Z0-9]+\\s*\\(");
 
-            if (m.size() == 0)
+            if (id.position == -1)
                 throw std::runtime_error("nameIndex() no id found before '('");
 
-            return m.position(0);
+            return id.position;
         }
     };
 
@@ -159,9 +182,10 @@ namespace monolith
     {
     private:
         std::string initializerList;
+        string structName;
     public:
-        Method(const string& ns) 
-            :BaseFunc(ns)
+        Method(const string& ns, const string& _struct) 
+            :BaseFunc(ns), structName(_struct)
         {
         }
 
@@ -186,6 +210,11 @@ namespace monolith
             }
         }
 
+        const string& GetProto() override
+        {
+            return prototype;
+        }
+
         void Dump(std::ostream& header, std::ostream& source) override
         {
             // prototype in header
@@ -195,10 +224,11 @@ namespace monolith
             // implementation in source
             // insert namespace
             string implProto(prototype);
-            implProto.insert(GetNameIndex(), _namespace + "::");
+            implProto.insert(GetNameIndex(), structName + "::");
 
-            source << implProto << initializerList << std::endl;
-            source << body << std::endl;
+            source << "namespace " << _namespace << "{" << std::endl;
+            source << "    " << implProto << initializerList << std::endl;
+            source << "    " << body << "}" << std::endl;
             source << std::endl;
         }
     };
@@ -226,14 +256,10 @@ namespace monolith
                 header << "namespace " << _namespace << " {" << std::endl;
                 header << "     " << prototype << ";}" << std::endl;
                 header << std::endl;
-
-                // implementation in source
-                // insert namespace
-                string implProto(prototype);
-                implProto.insert(GetNameIndex(), _namespace + "::");
-
-                source << implProto << std::endl;
-                source << body << std::endl;
+                
+                source << "namespace " << _namespace << " {" << std::endl;
+                source << "    " << prototype << std::endl;
+                source << "    " << body << "}" << std::endl;
                 source << std::endl;
             }
         }
@@ -245,9 +271,14 @@ namespace monolith
     private:
         std::string prototype;
     public:
-        Field(const string& proto)
+        Field(const string& proto):
+            prototype(proto)
         {
-            prototype = proto;
+        }
+
+        const string& GetProto() override
+        {
+            return prototype;
         }
 
         void Dump(std::ostream& header, std::ostream& source) override
@@ -271,11 +302,8 @@ namespace monolith
 
         int GetNameIndex() const
         {
-            std::smatch m;
-            std::regex r("[_a-z0-9A-Z]+;");
-            std::regex_search(prototype, m, r);
-
-            return m.position(0);
+            auto name = util::firstMatch(prototype, "[_a-z0-9A-Z]+;");
+            return name.position;
         }
 
         void Dump(std::ostream& header, std::ostream& source) override
@@ -287,7 +315,9 @@ namespace monolith
             string implprototype = prototype;
             implprototype.insert(GetNameIndex(), _namespace + "::");
 
-            source << implprototype << std::endl;
+            source << "namespace " << _namespace << " {" << std::endl;
+            source << implprototype << "}" << std::endl;
+            source << std::endl;
         }
     };
 
@@ -302,13 +332,11 @@ namespace monolith
         EnumClass(string proto, const string& ns):
             prototype(proto), _namespace(ns)
         {
-            std::smatch m;
-            std::regex r("[_a-zA-Z0-9]+");
             int whereNameStarts = string("enum class ").length();
             string protostartingwithname(prototype.substr(whereNameStarts));
-            std::regex_search(protostartingwithname, m, r);
 
-            name = m[0].str();
+            auto match = util::firstMatch(protostartingwithname, "[_a-zA-Z0-9]+");
+            name = match.str;
         }
 
         void AddBody(const string& str)
@@ -353,10 +381,8 @@ namespace monolith
 
         void Dump(std::ostream& header, std::ostream& source) override
         {
-            header << "namespace " << _namespace << std::endl;
-            header << "{" << std::endl;
-            header << prototype << std::endl;
-            header << "}" << std::endl;
+            header << "namespace " << _namespace << "{" << std::endl;
+            header << "    " <<prototype << "}" << std::endl;
             header << std::endl;
         }
     };
@@ -364,6 +390,11 @@ namespace monolith
     enum class SCType
     {
         Struct, Class
+    };
+
+    enum class NodeColor
+    {
+        White, Gray, Black
     };
 
     class StructClass : public IDump
@@ -376,20 +407,48 @@ namespace monolith
         vector<IDump*> privateMembers;
         vector<IDump*> publicMembers;
         vector<IDump*> protectedMembers;
+
+        NodeColor color;        
+        vector<StructClass*> dependencies;
     public:
         StructClass(const string& proto, const string& ns):
-            prototype(proto), _namespace(ns)
+            prototype(proto), _namespace(ns), color(NodeColor::White)
         {
-            std::smatch m;
-            std::regex r(" [_a-zA-Z0-9]+");
-            std::regex_search(prototype, m, r);
-
-            name = m[0].str().substr(1); // substr(1) because it starts with space
+            auto match = util::firstMatch(prototype, " [_a-zA-Z0-9]+");
+            name = match.str.substr(1); // substr(1) because it starts with space
         }
 
         const string& GetName() const
         {
             return name;
+        }
+
+        // to find dependencies find all words that dont end with & or * and that ar not identifiers or keywords
+        // example: s id1;  ->   dependends on s
+        //          s* id2; ->   no dependency
+        //          void   fun1(const s& _s1, Fish f); -> depends on Fish
+        void FindDependencies(const std::unordered_map<string, StructClass*>& structClasses)
+        {
+            for (IDump* i : members)
+            {
+                string proto = i->GetProto();
+            }
+        }
+
+        void Traverse(const std::unordered_map<string, StructClass*>& structClasses, vector<StructClass*>& ordered)
+        {
+            if (color == NodeColor::Gray)
+                throw std::runtime_error("dependency loop detected");
+            else if (color == NodeColor::Black)
+                return;
+
+            color = NodeColor::Gray;
+
+            for (auto& e : dependencies)
+                e->Traverse(structClasses, ordered);
+
+            color = NodeColor::Black;
+            ordered.push_back(this);
         }
 
         // return struct or class
@@ -466,161 +525,19 @@ namespace monolith
         }
     };
 
-    /*
-    class Namespace : public IDump
-    {
-    private:
-        string name;
-        vector<Namespace*> namespaces;
-        vector<StructClass*> structClasses;
-        vector<Function*> functions;
-        vector<NsVariable*> variables;
-        vector<EnumClass*> enums;
-        vector<Using*> usings;
-        vector<IDump*> everything;
-    public:
-        Namespace(const string& proto)
-            :name(proto.substr(10))
-        {
-        }
-
-        void AddNamespace(Namespace* ns)
-        {
-            namespaces.push_back(ns);
-        }
-
-        void AddStructClass(StructClass* sc)
-        {
-            structClasses.push_back(sc);
-        }
-
-        void AddFunction(Function* fun)
-        {
-            functions.push_back(fun);
-        }
-
-        void AddVariable(NsVariable* var)
-        {
-            variables.push_back(var);
-        }
-
-        void AddEnum(EnumClass* enumClass)
-        {
-            enums.push_back(enumClass);
-        }
-
-        void AddUsing(Using* u)
-        {
-            usings.push_back(u);
-        }
-
-        const string& GetName() const
-        {
-            return name;
-        }
-
-        // struct, classes, enum classes
-        void DumpForwardDeclarations(std::ostream& header)
-        {
-            header << headertab;
-            header << "namespace " << name << std::endl;
-            header << headertab;
-            header << '{' << std::endl;
-
-            headertab += "    ";
-
-            for (StructClass* sc : structClasses)
-            {
-                header << headertab;
-                header << sc->GetSimplePrototype() << ";" << std::endl;
-            }
-
-            for (EnumClass* e : enums)
-            {
-                header << headertab;
-                header << e->GetSimplePrototype() << ";" << std::endl;
-            }
-
-            for (Namespace* ns : namespaces)
-                ns->DumpForwardDeclarations(header);
-
-            headertab.pop_back();
-            headertab.pop_back();
-            headertab.pop_back();
-            headertab.pop_back();
-
-            header << headertab;
-            header << "}" << std::endl << std::endl;
-        }
-
-        void Dump(std::ostream& header, std::ostream& source) override
-        {
-            header << headertab;
-            header << "namespace " << name << std::endl;
-
-            header << headertab;
-            header << '{' << std::endl;
-
-            source << sourcetab;
-            source << "namespace " << name << std::endl;
-
-            source << sourcetab;
-            source << '{' << std::endl;
-
-            headertab += "    ";
-            sourcetab += "    ";
-
-            for (IDump* i : usings)
-                i->Dump(header, source);
-
-            header << std::endl;
-
-            for (IDump* i : enums)
-                i->Dump(header, source);
-
-            for (IDump* i : structClasses)
-                i->Dump(header, source);
-
-            for (IDump* i : functions)
-                i->Dump(header, source);
-
-            for (IDump* i : namespaces)
-                i->Dump(header, source);
-
-            for (IDump* i : variables)
-                i->Dump(header, source);
-
-            headertab.pop_back();
-            headertab.pop_back();
-            headertab.pop_back();
-            headertab.pop_back();
-
-            sourcetab.pop_back();
-            sourcetab.pop_back();
-            sourcetab.pop_back();
-            sourcetab.pop_back();
-
-            header << headertab;
-            header << "}" << std::endl << std::endl;
-
-            source << sourcetab;
-            source << "}" << std::endl << std::endl;
-        }
-    };
-    */
-
 
     class Monolith
     {
     private:        
         vector<string> includes;
-        vector<StructClass*> structClasses;
+        std::unordered_map<string,StructClass*> structClasses;
         vector<Function*> functions;
         vector<NsVariable*> variables;
         vector<EnumClass*> enums;
         vector<Using*> usings;
         Function* main;
-
+        vector<StructClass*> orderedStructClasses;
+        
         int lineNum;
         string filename; // currently parsed file, used to error messages
         std::function<bool(string&)> next;  // read next source code line to the string, return true if eof
@@ -643,7 +560,7 @@ namespace monolith
             while (currentNamespace.length() > 0 && currentNamespace.back() != ':')
                 currentNamespace.pop_back();
 
-            if(currentNamespace.length() > 0)
+            if (currentNamespace.length() > 0)
             {
                 currentNamespace.pop_back();
                 currentNamespace.pop_back();
@@ -689,9 +606,9 @@ namespace monolith
             return fun;
         }
 
-        Method* ExtractMethod(string& line)
+        Method* ExtractMethod(string& line, const string& structName)
         {
-            Method* method = new Method(currentNamespace);
+            Method* method = new Method(currentNamespace, structName);
 
             // get prototype first
             method->AddProto(line);
@@ -798,12 +715,8 @@ namespace monolith
                 }
                 else if (util::endsWith(line, ")") || util::endsWith(line, ","))
                 {
-                    enterNamespace(structClass->GetName());
-                    
-                    Method* m = ExtractMethod(line);
+                    Method* m = ExtractMethod(line, structClass->GetName());
                     structClass->AddMember(m, accSpecifier);
-                    
-                    exitNamespace();
                 }
                 else if (util::startsWith(line, "/*"))
                 {
@@ -863,7 +776,7 @@ namespace monolith
                 else if (util::startsWith(line, "class") || util::startsWith(line, "struct"))
                 {
                     StructClass* s = ExtractStructClass(line);
-                    structClasses.push_back(s);
+                    structClasses[s->GetName()] = (s);
                 }
                 else if (line.length() == 0)
                 {
@@ -948,6 +861,16 @@ namespace monolith
 
         void DependencyOrder()
         {
+            // 1. find dependencies
+            for (auto& sc : structClasses)
+                sc.second->FindDependencies(structClasses);
+
+            // 2. start all dependencies traversal
+            // if there are no dependencies then just copy to ordered
+            // if there is then do DFS to the bottom and copy on the way back
+            // if there is a cycle then throw exception
+            for (auto& sc : structClasses)
+                sc.second->Traverse(structClasses, orderedStructClasses);
         }
     public:
         // ctor is the main driver, it will produce IR of all C++ source files
@@ -982,7 +905,7 @@ namespace monolith
 
         void DumpForwardDeclaration(std::ostream& header)
         {
-            for (StructClass* sc : structClasses)
+            for (StructClass* sc : orderedStructClasses)
                 sc->DumpForwardDecl(header);
 
             for (EnumClass* e : enums)
@@ -999,7 +922,7 @@ namespace monolith
             for (IDump* i : enums)
                 i->Dump(header, source);
 
-            for (IDump* i : structClasses)
+            for (IDump* i : orderedStructClasses)
                 i->Dump(header, source);
 
             for (IDump* i : functions)
@@ -1017,7 +940,7 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; i++)
         args.push_back(argv[i]);
 
-    args.push_back("C:/Users/Szpak/Documents/Visual Studio 2015/Projects/CppHeaderBuilder/CppHeaderBuilder/test1.cpp");
+    args.push_back("test1.cpp");
 
     try
     {
