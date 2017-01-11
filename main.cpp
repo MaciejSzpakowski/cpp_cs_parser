@@ -4,6 +4,7 @@
 
 // syntax restrictions
 // * everything must be in a namespace except main and includes (which must be in global scope)
+// * #define must be one line
 // * no structs/classes etc in other struct/classes
 // * block comment open token must be the first token of the line and close token must be last
 // * includes, field/namespace/struct/class declaration and function prototypes must be one liners, one exception: 
@@ -15,10 +16,11 @@
 // * structs can have only fields and methods (no other structs)
 // * no old school enums, enum class only
 // * dont put block comments in funny places e.g. between prototype and '{'
-// * using statements only in namespaces
+// * using statements/typedefs only in namespaces
 // * pure virtual methods must be one line
 // * no structs/classes with the same name e.g. ns1::S1 and ns2::S1
-// * for now, no unions
+// * for now, templates only for classes
+// * DON'T put 'struct::' with a struct member e.g. struct S{ int S::fun(){return 0;} };
 
 #include <fstream>
 #include <vector>
@@ -94,7 +96,7 @@ namespace util
     void syntaxError(int line, const string& filename, const char* msg)
     {
         std::stringstream str;
-        str << "Syntax error" << filename << ":" << line;
+        str << "Syntax error " << filename << ":" << line;
         if (msg != 0)
             str << " " << msg;
 
@@ -106,9 +108,12 @@ namespace util
         if (str.length() == 0)
             return str;
 
-        string newstr = str;
+        string newstr(str);
 
-        while (newstr.back() == ' ')
+        if (newstr.size() != str.size())
+            throw std::runtime_error("crow says FUCK YOU");
+
+        while (newstr.size() > 0 && newstr.back() == ' ')
             newstr.pop_back();
 
         int start;
@@ -185,16 +190,21 @@ namespace monolith
 
         // where name starts
         // this method assumes that name is right before first '('
-        int GetNameIndex()
+        int GetNameIndex(const string& proto)
         {
-            string proto(prototype);
             // find first '('
             int index = proto.find('(');
             // find id
-            auto id = util::firstMatch(proto, "[~_a-zA-Z0-9]+\\s*\\(");
+            auto id = util::firstMatch(proto, "([~_a-zA-Z0-9]+\\s*\\()|( operator[^_a-zA-Z0-9])");
+
+            if (util::startsWith(id.str, " operator"))
+                return id.position + 1;
 
             if (id.position == -1)
-                throw std::runtime_error("nameIndex() no id found before '('");
+            {
+                string msg = "BaseFunc::nameIndex() no id found before '(' in " + prototype;
+                throw std::runtime_error(msg.c_str());
+            }
 
             return id.position;
         }
@@ -224,12 +234,14 @@ namespace monolith
                 else if (prototype.at(i) == ')')
                     openparencounter--;
 
-                if (prototype.at(i) == ':' && openparencounter == 0 && prototype.at(i+1) != ':')
+                if (prototype.at(i) == ':' && openparencounter == 0 && prototype.at(i + 1) != ':')
                 {
                     initializerList = prototype.substr(i);
                     prototype = prototype.substr(0, i);
                     break;
                 }
+                else if (prototype.at(i) == ':' && prototype.at(i + 1) == ':') // skipp ::
+                    i++;
             }
 
             prototype = util::trim(prototype);
@@ -255,7 +267,11 @@ namespace monolith
             if (overridePos != string::npos)
                 implProto = implProto.replace(overridePos, 8, "");
 
-            implProto.insert(GetNameIndex(), structName + "::");
+            // remove static from impl
+            if (util::startsWith(implProto,"static "))
+                implProto = implProto.replace(0, 7, "");
+            
+            implProto.insert(GetNameIndex(implProto), structName + "::");
 
             source << "namespace " << _namespace << "{" << std::endl;
             source << implProto << initializerList << std::endl;
@@ -325,10 +341,24 @@ namespace monolith
     private:
         string prototype;
         string _namespace;
+        string value; // in case of initialized variables
+
+        // splits decl and init if there is '='
+        void SplitDeclaration()
+        {
+            int equalpos = prototype.find('=');
+
+            if (equalpos == string::npos)
+                return;
+
+            value = prototype.substr(equalpos + 1);
+            prototype = prototype.substr(0, equalpos);
+        }
     public:
         NsVariable(const string& proto, const string& ns):
             prototype(proto), _namespace(ns)
         {
+            SplitDeclaration();
         }
 
         int GetNameIndex() const
@@ -340,14 +370,21 @@ namespace monolith
         void Dump(std::ostream& header, std::ostream& source) override
         {
             header << "namespace " << _namespace << " {" << std::endl;
-            header << "    extern " << prototype << "}" << std::endl;
+            header << "    extern " << prototype;
+
+            if (value.length() != 0)
+                header << ";";
+
+            header << "}" << std::endl;
             header << std::endl;
 
-            string implprototype = prototype;
-            implprototype.insert(GetNameIndex(), _namespace + "::");
-
             source << "namespace " << _namespace << " {" << std::endl;
-            source << implprototype << "}" << std::endl;
+            source << prototype;
+
+            if (value.length() != 0)
+                source << '=' << value;
+
+            source << "}" << std::endl;
             source << std::endl;
         }
     };
@@ -411,20 +448,20 @@ namespace monolith
         }
     };
 
-    enum class SCType
+    /*enum class SCType
     {
         Struct, Class
-    };
+    };*/
 
     enum class NodeColor
     {
         White, Gray, Black
     };
 
-    // test 123
     class StructClass : public IDump
     {
     protected:
+        string _template;
         string prototype;
         string name;
         string _namespace;
@@ -450,7 +487,10 @@ namespace monolith
                         auto id = util::firstMatch(proto, "[_a-zA-Z0-9]+;");
 
                         if (id.position == -1)
-                            throw std::runtime_error("FindDependencies() could not find id of a variable");
+                        {
+                            string msg = "FindDependencies() could not find id of a variable: [" + proto + "] in struct " + _namespace + "::" + name;
+                            throw std::runtime_error(msg.c_str());
+                        }
 
                         proto = proto.substr(0, id.position);
                     }
@@ -482,8 +522,8 @@ namespace monolith
             }
         }
     public:
-        StructClass(const string& proto, const string& ns):
-            prototype(proto), _namespace(ns), color(NodeColor::White)
+        StructClass(const string& proto, const string& ns, const string& templ):
+            prototype(proto), _namespace(ns), color(NodeColor::White), _template(templ)
         {
             auto match = util::firstMatch(prototype, " [_a-zA-Z0-9]+");
             name = match.str.substr(1); // substr(1) because it starts with space
@@ -497,9 +537,28 @@ namespace monolith
         // to find dependencies find all words that dont end with & or * and that ar not identifiers or keywords
         // example: s id1;  ->   dependends on s
         //          s* id2; ->   no dependency
+        //          struct S : public S2 -> depends on S2
         //          void   fun1(const s& _s1, Fish f); -> depends on Fish
         void FindDependencies(const std::unordered_map<string, StructClass*>& structClasses)
         {
+            int colonPos = prototype.find(':');            
+
+            // find inheritance dependencies
+            if (colonPos != string::npos)
+            {
+                string str = prototype.substr(colonPos);
+                util::Match m;
+
+                while ((m = util::firstMatch(str, "[_a-zA-Z0-9]+")).position != -1)
+                {
+                    str = str.substr(m.position + m.str.length());
+                    auto it = structClasses.find(m.str);
+
+                    if (it != structClasses.end())
+                        dependencies.push_back(it->second);
+                }
+            }
+
             FindDependenciesIn(structClasses, members);
             FindDependenciesIn(structClasses, privateMembers);
             FindDependenciesIn(structClasses, protectedMembers);
@@ -523,21 +582,23 @@ namespace monolith
         }
 
         // return struct or class
-        SCType GetType() const
+        /*SCType GetType() const
         {
             if (util::startsWith(prototype, "struct"))
                 return SCType::Struct;
             else
                 return SCType::Class;
-        }
+        }*/
 
         // simple prototype is just class/struct + name (no inheritance part)
         string GetSimplePrototype() const
         {
             if (util::startsWith(prototype, "class"))
                 return "class " + name;
-            else
+            else if (util::startsWith(prototype, "struct"))
                 return "struct " + name;
+            else
+                return "union " + name;
         }
 
         void AddMember(IDump* m, AccessSpecifier acc)
@@ -562,6 +623,10 @@ namespace monolith
         void Dump(std::ostream& header, std::ostream& source) override
         {
             header << "namespace " << _namespace << " {" << std::endl;
+            
+            if(_template.length() != 0)
+                header << _template << std::endl;
+
             header << prototype << std::endl;
             header << '{' << std::endl;
             
@@ -600,6 +665,7 @@ namespace monolith
     {
     private:        
         vector<string> includes;
+        vector<string> flags; // for conditional file parsing
         std::unordered_map<string,StructClass*> structClasses;
         vector<Function*> functions;
         vector<NsVariable*> variables;
@@ -756,9 +822,9 @@ namespace monolith
             return enumClass;
         }
 
-        StructClass* ExtractStructClass(const string& prototype)
+        StructClass* ExtractStructClass(const string& prototype, const string& templ)
         {
-            StructClass* structClass = new StructClass(prototype, currentNamespace);
+            StructClass* structClass = new StructClass(prototype, currentNamespace, templ);
             string line;
             AccessSpecifier accSpecifier = AccessSpecifier::NoSpecifier;
 
@@ -810,6 +876,7 @@ namespace monolith
         void ExtractNamespace(string& line)
         {
             enterNamespace(line.substr(10));
+            string templ;
 
             // match '{'
             next(line);
@@ -821,11 +888,16 @@ namespace monolith
             {
                 next(line);
                 line = util::removeLineComment(line);
+                templ = "";
 
-                if (util::startsWith(line, "using"))
+                if (util::startsWith(line, "using") || util::startsWith(line, "typedef"))
                 {
                     Using* u = new Using(line, currentNamespace);
                     usings.push_back(u);
+                }
+                else if (util::startsWith(line, "template"))
+                {
+                    templ = line;
                 }
                 else if (util::startsWith(line, "/*"))
                 {
@@ -847,9 +919,9 @@ namespace monolith
                     EnumClass* e = ExtractEnumClass(line);
                     enums.push_back(e);
                 }
-                else if (util::startsWith(line, "class") || util::startsWith(line, "struct"))
+                else if (util::startsWith(line, "class") || util::startsWith(line, "struct") || util::startsWith(line, "union"))
                 {
-                    StructClass* s = ExtractStructClass(line);
+                    StructClass* s = ExtractStructClass(line, templ);
 
                     // structs with the same name are not allowed
                     if(util::contains<string,StructClass*>(structClasses, s->GetName()))
@@ -887,8 +959,33 @@ namespace monolith
                 line = util::removeLineComment(line);
 
                 if (util::startsWith(line, "#include"))
+                {
+                    for (const string& s : includes)
+                        if (s == line)
+                            continue;
+
                     includes.push_back(line);
-                
+                }
+                else if (util::startsWith(line, "#pragma comment") || util::startsWith(line, "#define"))
+                {
+                    includes.push_back(line);
+                }
+                else if (util::startsWith(line, "#pragma compileif"))
+                {
+                    if (lineNum != 1)
+                        throw std::runtime_error("#pragma compileif must be on the first line");
+                    else
+                    {
+                        string flag = line.substr(18);
+                        bool flagdefined = false;
+                        for (int i = 0; i < (int)flags.size(); i++)
+                            if (flags.at(i) == flag)
+                                flagdefined = true;
+
+                        if (!flagdefined)
+                            return;
+                    }
+                }
                 else if (util::startsWith(line, "/*"))
                 {
                     while (!util::endsWith(line, "*/"))
@@ -910,6 +1007,7 @@ namespace monolith
                     util::syntaxError(lineNum, filename, "unknown program element");
                 }
             }
+            // dont put any code here
         }
 
         /////////////////// parser functions end
@@ -954,8 +1052,8 @@ namespace monolith
         }
     public:
         // ctor is the main driver, it will produce IR of all C++ source files
-        Monolith(const vector<string>& filenames):
-            lineNum(0)
+        Monolith(const vector<string>& filenames, const vector<string>& _flags):
+            lineNum(0), flags(_flags), main(nullptr)
         {
             for (const string& s : filenames)
                 Collect(s);
@@ -978,7 +1076,8 @@ namespace monolith
             DumpForwardDeclaration(header);
             
             // dump main
-            main->Dump(header, source);
+            if(main != nullptr)
+                main->Dump(header, source);
 
             Dump2(header, source);
         }
@@ -1017,9 +1116,11 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; i++)
         args.push_back(argv[i]);
 
-    string h;
-    string s;
+    string headerFile;
+    string sourceFile;
+    string hfile; // what to #include in source file
     vector<string> files;
+    vector<string> flags;
 
     try
     {
@@ -1027,12 +1128,22 @@ int main(int argc, char** argv)
         {
             if (args.at(i) == "-s")
             {
-                s = args.at(i + 1);
+                sourceFile = args.at(i + 1);
                 i++;
             }
             else if (args.at(i) == "-h")
             {
-                h = args.at(i + 1);
+                headerFile = args.at(i + 1);
+                i++;
+            }
+            else if (args.at(i) == "-f")
+            {
+                flags.push_back(args.at(i + 1));
+                i++;
+            }
+            else if (args.at(i) == "-hname")
+            {
+                hfile = args.at(i + 1);
                 i++;
             }
             else
@@ -1053,11 +1164,11 @@ int main(int argc, char** argv)
 
     try
     {
-        monolith::Monolith mono(files);
-        mono.Dump(std::ofstream(h), std::ofstream(s), "header.h");
+        monolith::Monolith mono(files, flags);
+        mono.Dump(std::ofstream(headerFile), std::ofstream(sourceFile), hfile);
         //mono.Dump(std::cout, std::cout, "header.h");
     }
-    catch (std::runtime_error& e)
+    catch (std::exception& e)
     {
         printf("%s\n", e.what());
     }
